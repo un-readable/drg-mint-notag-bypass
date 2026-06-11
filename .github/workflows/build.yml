@@ -1,0 +1,168 @@
+name: Build Patched mint-notag
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+
+jobs:
+  check-and-build:
+    runs-on: ubuntu-latest
+    outputs:
+      should_build: ${{ steps.check.outputs.should_build }}
+      upstream_tag: ${{ steps.check.outputs.upstream_tag }}
+
+    steps:
+      - name: Get latest upstream release tag
+        id: upstream
+        run: |
+          TAG=$(curl -s https://api.github.com/repos/Strappazzon/drg-mint-notag/releases/latest \
+            | jq -r '.tag_name')
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+
+      - name: Get last built tag
+        id: last_built
+        run: |
+          TAG=$(curl -s https://api.github.com/repos/${{ github.repository }}/releases/latest \
+            | jq -r '.tag_name // "none"')
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+
+      - name: Decide whether to build
+        id: check
+        run: |
+          UPSTREAM="${{ steps.upstream.outputs.tag }}"
+          LAST="${{ steps.last_built.outputs.tag }}"
+          echo "Upstream: $UPSTREAM  |  Last built: $LAST"
+          if [ "$UPSTREAM" != "$LAST" ] || [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "should_build=true" >> $GITHUB_OUTPUT
+          else
+            echo "should_build=false" >> $GITHUB_OUTPUT
+          fi
+          echo "upstream_tag=$UPSTREAM" >> $GITHUB_OUTPUT
+
+  build:
+    needs: check-and-build
+    if: needs.check-and-build.outputs.should_build == 'true'
+    runs-on: windows-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Download upstream source
+        shell: pwsh
+        run: |
+          $tag = "${{ needs.check-and-build.outputs.upstream_tag }}"
+          $url = "https://github.com/Strappazzon/drg-mint-notag/archive/refs/tags/$tag.zip"
+          Invoke-WebRequest -Uri $url -OutFile source.zip
+          Expand-Archive -Path source.zip -DestinationPath staging
+          $extracted = Get-ChildItem -Path staging -Directory | Select-Object -First 1
+          Get-ChildItem $extracted.FullName | ForEach-Object {
+            $dest = Join-Path "." $_.Name
+            if (-not (Test-Path $dest)) {
+              Move-Item $_.FullName -Destination .
+            } else {
+              Write-Host "Skipping existing: $($_.Name)"
+            }
+          }
+          Remove-Item staging -Recurse
+          Remove-Item source.zip
+
+      - name: Apply patches
+        shell: bash
+        run: |
+          # Patch 1: replace pak filename
+          find . -type f \( -name "*.rs" -o -name "*.toml" -o -name "*.md" \) \
+            -exec sed -i 's/mods_P\.pak/FSD-WindowsNoEditor099.pak/g' {} +
+
+          # Patch 2: replace all github.com repo links
+          find . -type f \( -name "*.rs" -o -name "*.toml" -o -name "*.md" \) \
+            -exec sed -i 's|https://github.com/Strappazzon/drg-mint-notag|https://github.com/un-readable/drg-mint-notag-bypass|g' {} +
+
+          # Patch 3: replace the api.github.com update check URL
+          find . -type f -name "*.rs" \
+            -exec sed -i 's|api.github.com/repos/Strappazzon/drg-mint-notag|api.github.com/repos/un-readable/drg-mint-notag-bypass|g' {} +
+
+          # Patch 4: override toolchain to nightly for bindeps support
+          printf '[toolchain]\nchannel = "nightly-2024-02-01"\n' > rust-toolchain.toml
+
+          echo "Verifying..."
+          grep -r "Strappazzon" --include="*.rs" . && echo "WARNING: Strappazzon refs remain" || echo "All clear"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: nightly-2024-02-01
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache Rust dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: windows-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: windows-cargo-
+
+      - name: Build
+        shell: bash
+        run: cargo build --release --target x86_64-pc-windows-msvc
+
+      - name: Stage artifact
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp target/x86_64-pc-windows-msvc/release/mint.exe mint.exe
+          if [ -f "oo2core_9_win64.dll" ]; then
+            7z a dist/mint-x86_64-pc-windows-msvc.zip mint.exe oo2core_9_win64.dll CHANGELOG.md LICENSE.txt
+          else
+            7z a dist/mint-x86_64-pc-windows-msvc.zip mint.exe CHANGELOG.md LICENSE.txt
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-windows
+          path: dist/
+
+  release:
+    needs: [check-and-build, build]
+    runs-on: ubuntu-latest
+    if: always() && needs.check-and-build.outputs.should_build == 'true' && needs.build.result != 'skipped'
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Get upstream release notes
+        id: upstream_notes
+        run: |
+          TAG="${{ needs.check-and-build.outputs.upstream_tag }}"
+          BODY=$(curl -s "https://api.github.com/repos/Strappazzon/drg-mint-notag/releases/tags/$TAG" \
+            | jq -r '.body // ""')
+          echo "body<<EOF" >> $GITHUB_OUTPUT
+          echo "$BODY" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.check-and-build.outputs.upstream_tag }}
+          name: ${{ needs.check-and-build.outputs.upstream_tag }}
+          body: |
+            ${{ steps.upstream_notes.outputs.body }}
+
+            ---
+            > **Patched build** — auto-built from upstream [${{ needs.check-and-build.outputs.upstream_tag }}](https://github.com/Strappazzon/drg-mint-notag/releases/tag/${{ needs.check-and-build.outputs.upstream_tag }})
+            > Patch applied: `mods_P.pak` → `FSD-WindowsNoEditor099.pak`
+          files: dist/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
