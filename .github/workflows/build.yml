@@ -16,20 +16,8 @@ jobs:
       - name: Get latest upstream release tag
         id: upstream
         run: |
-          RESPONSE=$(curl -s -w "\n%{http_code}" https://api.github.com/repos/Strappazzon/drg-mint-notag/releases/latest)
-          HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-          BODY=$(echo "$RESPONSE" | head -1)
-          if [ "$HTTP_CODE" != "200" ]; then
-            echo "API returned $HTTP_CODE, skipping build"
-            echo "tag=none" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-          if [ "$HTTP_CODE" != "404" ]; then
-            echo "API returned $HTTP_CODE, skipping build"
-            echo "tag=none" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-          TAG=$(echo "$BODY" | jq -r '.tag_name')
+          TAG=$(curl -s https://api.github.com/repos/Strappazzon/drg-mint-notag/releases/latest \
+            | jq -r '.tag_name')
           echo "tag=$TAG" >> $GITHUB_OUTPUT
 
       - name: Get last built tag
