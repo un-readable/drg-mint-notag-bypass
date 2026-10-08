@@ -89,6 +89,11 @@ jobs:
         shell: bash
         run: |
           TAG="${{ matrix.tag }}"
+
+          # keep the Oodle DLL from this repo (the tag's source doesn't ship it)
+          mkdir -p "$RUNNER_TEMP/keep"
+          [ -f oo2core_9_win64.dll ] && cp oo2core_9_win64.dll "$RUNNER_TEMP/keep/"
+
           curl -sSL -o "$RUNNER_TEMP/source.zip" \
             "https://github.com/Strappazzon/drg-mint-notag/archive/refs/tags/$TAG.zip"
           rm -rf "$RUNNER_TEMP/staging"
@@ -99,6 +104,15 @@ jobs:
 
           cp -R "$RUNNER_TEMP"/staging/*/. .
           chmod -R u+w .
+
+          # restore the DLL, or fetch it from the upstream commit if it wasn't in this repo
+          if [ -f "$RUNNER_TEMP/keep/oo2core_9_win64.dll" ]; then
+            cp "$RUNNER_TEMP/keep/oo2core_9_win64.dll" .
+          elif [ ! -f oo2core_9_win64.dll ]; then
+            curl -sSLf -o oo2core_9_win64.dll \
+              "https://raw.githubusercontent.com/Strappazzon/drg-mint-notag/1e519bf069d519c3614737c2c8a542138c5246f0/oo2core_9_win64.dll" \
+              || echo "WARNING: could not get oo2core_9_win64.dll"
+          fi
           ls
 
       - name: Apply patches
