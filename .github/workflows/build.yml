@@ -4,48 +4,66 @@ on:
   schedule:
     - cron: '0 0 * * *'
   workflow_dispatch:
+    inputs:
+      backfill:
+        description: 'Build ALL upstream releases, oldest to newest'
+        type: boolean
+        default: false
+      tag:
+        description: 'Build one specific upstream tag (optional)'
+        required: false
+        default: ''
 
 jobs:
   check-and-build:
     runs-on: ubuntu-latest
     outputs:
-      should_build: ${{ steps.check.outputs.should_build }}
-      upstream_tag: ${{ steps.check.outputs.upstream_tag }}
+      tags: ${{ steps.check.outputs.tags }}
+      newest: ${{ steps.check.outputs.newest }}
 
     steps:
-      - name: Get latest upstream release tag
-        id: upstream
-        run: |
-          TAG=$(curl -s https://api.github.com/repos/Strappazzon/drg-mint-notag/releases/latest \
-            | jq -r '.tag_name')
-          echo "tag=$TAG" >> $GITHUB_OUTPUT
-
-      - name: Get last built tag
-        id: last_built
-        run: |
-          TAG=$(curl -s https://api.github.com/repos/${{ github.repository }}/releases/latest \
-            | jq -r '.tag_name // "none"')
-          echo "tag=$TAG" >> $GITHUB_OUTPUT
-
-      - name: Decide whether to build
+      - name: Work out which tags to build
         id: check
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          BACKFILL: ${{ inputs.backfill }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          UPSTREAM="${{ steps.upstream.outputs.tag }}"
-          LAST="${{ steps.last_built.outputs.tag }}"
-          echo "Upstream: $UPSTREAM  |  Last built: $LAST"
-          if [ "$UPSTREAM" != "$LAST" ] || [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "should_build=true" >> $GITHUB_OUTPUT
+          UP="https://api.github.com/repos/Strappazzon/drg-mint-notag/releases"
+          AUTH="Authorization: Bearer $GH_TOKEN"
+          NEWEST=$(curl -s -H "$AUTH" "$UP/latest" | jq -r '.tag_name')
+
+          if [ -n "$INPUT_TAG" ]; then
+            TAGS=$(jq -cn --arg t "$INPUT_TAG" '[$t]')
+          elif [ "$BACKFILL" = "true" ]; then
+            TAGS=$(curl -s -H "$AUTH" "$UP?per_page=100" \
+              | jq -c '[.[] | select(.draft == false)] | sort_by(.published_at) | map(.tag_name)')
           else
-            echo "should_build=false" >> $GITHUB_OUTPUT
+            CODE=$(curl -s -o /dev/null -w "%{http_code}" -H "$AUTH" \
+              "https://api.github.com/repos/${{ github.repository }}/releases/tags/$NEWEST")
+            if [ "$CODE" = "200" ]; then
+              TAGS='[]'
+            else
+              TAGS=$(jq -cn --arg t "$NEWEST" '[$t]')
+            fi
           fi
-          echo "upstream_tag=$UPSTREAM" >> $GITHUB_OUTPUT
+
+          echo "Newest upstream: $NEWEST"
+          echo "Building: $TAGS"
+          echo "tags=$TAGS" >> $GITHUB_OUTPUT
+          echo "newest=$NEWEST" >> $GITHUB_OUTPUT
 
   build:
     needs: check-and-build
-    if: needs.check-and-build.outputs.should_build == 'true'
+    if: needs.check-and-build.outputs.tags != '[]'
     runs-on: windows-latest
     permissions:
       contents: write
+    strategy:
+      fail-fast: false
+      max-parallel: 1   # one at a time so releases are created oldest -> newest
+      matrix:
+        tag: ${{ fromJson(needs.check-and-build.outputs.tags) }}
 
     steps:
       - name: Checkout repo
@@ -54,7 +72,7 @@ jobs:
       - name: Download upstream source
         shell: pwsh
         run: |
-          $tag = "${{ needs.check-and-build.outputs.upstream_tag }}"
+          $tag = "${{ matrix.tag }}"
           $url = "https://github.com/Strappazzon/drg-mint-notag/archive/refs/tags/$tag.zip"
           Invoke-WebRequest -Uri $url -OutFile source.zip
           Expand-Archive -Path source.zip -DestinationPath staging
@@ -73,24 +91,18 @@ jobs:
       - name: Apply patches
         shell: bash
         run: |
-          # Patch 1: replace pak filename
           find . -type f \( -name "*.rs" -o -name "*.toml" -o -name "*.md" \) \
             -exec sed -i 's/mods_P\.pak/FSD-WindowsNoEditor099.pak/g' {} +
 
-          # Patch 2: replace all github.com repo links
           find . -type f \( -name "*.rs" -o -name "*.toml" -o -name "*.md" \) \
             -exec sed -i 's|https://github.com/Strappazzon/drg-mint-notag|https://github.com/un-readable/drg-mint-notag-bypass|g' {} +
 
-          # Patch 3: replace the api.github.com update check URL
           find . -type f -name "*.rs" \
             -exec sed -i 's|api.github.com/repos/Strappazzon/drg-mint-notag|api.github.com/repos/un-readable/drg-mint-notag-bypass|g' {} +
 
-          # Patch 4: override toolchain to nightly for bindeps support
           printf '[toolchain]\nchannel = "nightly-2024-02-01"\n' > rust-toolchain.toml
 
-          # Patch 5: update version to match upstream tag
-          UPSTREAM_VERSION="${{ needs.check-and-build.outputs.upstream_tag }}"
-          # Strip the leading 'v'
+          UPSTREAM_VERSION="${{ matrix.tag }}"
           VERSION="${UPSTREAM_VERSION#v}"
           sed -i "s/^version = \".*\"/version = \"$VERSION\"/" Cargo.toml
           echo "Version set to: $VERSION"
@@ -123,53 +135,32 @@ jobs:
         run: |
           mkdir -p dist
           cp target/x86_64-pc-windows-msvc/release/mint.exe mint.exe
-          if [ -f "oo2core_9_win64.dll" ]; then
-            7z a dist/mint-x86_64-pc-windows-msvc.zip mint.exe oo2core_9_win64.dll CHANGELOG.md LICENSE.txt
-          else
-            7z a dist/mint-x86_64-pc-windows-msvc.zip mint.exe CHANGELOG.md LICENSE.txt
-          fi
+          FILES="mint.exe"
+          for f in oo2core_9_win64.dll CHANGELOG.md LICENSE.txt; do
+            [ -f "$f" ] && FILES="$FILES $f"
+          done
+          7z a dist/mint-x86_64-pc-windows-msvc.zip $FILES
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: binary-windows
-          path: dist/
-
-  release:
-    needs: [check-and-build, build]
-    runs-on: ubuntu-latest
-    if: always() && needs.check-and-build.outputs.should_build == 'true' && needs.build.result != 'skipped'
-    permissions:
-      contents: write
-
-    steps:
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: dist
-          merge-multiple: true
-
-      - name: Get upstream release notes
-        id: upstream_notes
+      - name: Prepare release notes
+        shell: bash
         run: |
-          TAG="${{ needs.check-and-build.outputs.upstream_tag }}"
-          BODY=$(curl -s "https://api.github.com/repos/Strappazzon/drg-mint-notag/releases/tags/$TAG" \
-            | jq -r '.body // ""')
-          echo "body<<EOF" >> $GITHUB_OUTPUT
-          echo "$BODY" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
+          TAG="${{ matrix.tag }}"
+          curl -s "https://api.github.com/repos/Strappazzon/drg-mint-notag/releases/tags/$TAG" \
+            | jq -r '.body // ""' > "$RUNNER_TEMP/notes.md"
+          cat >> "$RUNNER_TEMP/notes.md" <<EOF
+
+          ---
+          > **Patched build** — auto-built from upstream [$TAG](https://github.com/Strappazzon/drg-mint-notag/releases/tag/$TAG)
+          > Patch applied: \`mods_P.pak\` → \`FSD-WindowsNoEditor099.pak\`
+          EOF
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ needs.check-and-build.outputs.upstream_tag }}
-          name: ${{ needs.check-and-build.outputs.upstream_tag }}
-          body: |
-            ${{ steps.upstream_notes.outputs.body }}
-
-            ---
-            > **Patched build** — auto-built from upstream [${{ needs.check-and-build.outputs.upstream_tag }}](https://github.com/Strappazzon/drg-mint-notag/releases/tag/${{ needs.check-and-build.outputs.upstream_tag }})
-            > Patch applied: `mods_P.pak` → `FSD-WindowsNoEditor099.pak`
+          tag_name: ${{ matrix.tag }}
+          name: mint-notag ${{ matrix.tag }}
+          body_path: ${{ runner.temp }}/notes.md
+          make_latest: ${{ matrix.tag == needs.check-and-build.outputs.newest }}
           files: dist/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
