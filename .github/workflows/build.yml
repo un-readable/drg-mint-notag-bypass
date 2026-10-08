@@ -179,7 +179,32 @@ jobs:
             cp "$p" dist/
           done
           ls -la dist
+          
+      - name: Add Oodle DLL to Windows zip
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          if [ ! -f oo2core_9_win64.dll ]; then
+            echo "ERROR: oo2core_9_win64.dll not found in workspace"
+            exit 1
+          fi
 
+          ZIP=$(ls dist/*windows-msvc*.zip | head -n1)
+          echo "Zip: $ZIP"
+
+          # find where mint.exe lives inside the zip (root or a wrapper folder)
+          EXE=$(7z l -slt "$ZIP" | tr -d '\r' | sed -n 's/^Path = //p' | grep -i 'mint\.exe$' | head -n1)
+          DIR=$(dirname "$EXE")
+          echo "mint.exe is at: $EXE"
+
+          mkdir -p "$RUNNER_TEMP/zipfix/$DIR"
+          cp oo2core_9_win64.dll "$RUNNER_TEMP/zipfix/$DIR/"
+          ZIPABS="$(pwd)/$ZIP"
+          (cd "$RUNNER_TEMP/zipfix" && 7z a "$ZIPABS" "$DIR/oo2core_9_win64.dll")
+
+          echo "Final contents:"
+          7z l "$ZIP"
+          
       - name: Prepare release notes
         shell: bash
         run: |
