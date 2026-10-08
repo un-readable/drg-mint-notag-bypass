@@ -56,7 +56,7 @@ jobs:
   build:
     needs: check-and-build
     if: needs.check-and-build.outputs.tags != '[]'
-    runs-on: windows-latest
+    runs-on: ${{ matrix.os }}
     permissions:
       contents: write
     strategy:
@@ -64,10 +64,26 @@ jobs:
       max-parallel: 1   # one at a time so releases are created oldest -> newest
       matrix:
         tag: ${{ fromJson(needs.check-and-build.outputs.tags) }}
+        target: [x86_64-pc-windows-msvc, x86_64-unknown-linux-gnu]
+        include:
+          - target: x86_64-pc-windows-msvc
+            os: windows-2022
+            bin: mint.exe
+            rust_targets: x86_64-pc-windows-msvc
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-22.04
+            bin: mint
+            rust_targets: x86_64-unknown-linux-gnu,x86_64-pc-windows-gnu
 
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt update
+          sudo apt install -y gcc-mingw-w64 libgtk-3-dev
 
       - name: Download upstream source
         shell: pwsh
@@ -91,17 +107,22 @@ jobs:
       - name: Apply patches
         shell: bash
         run: |
+          # Patch 1: replace pak filename
           find . -type f \( -name "*.rs" -o -name "*.toml" -o -name "*.md" \) \
             -exec sed -i 's/mods_P\.pak/FSD-WindowsNoEditor099.pak/g' {} +
 
+          # Patch 2: replace all github.com repo links
           find . -type f \( -name "*.rs" -o -name "*.toml" -o -name "*.md" \) \
             -exec sed -i 's|https://github.com/Strappazzon/drg-mint-notag|https://github.com/un-readable/drg-mint-notag-bypass|g' {} +
 
+          # Patch 3: replace the api.github.com update check URL
           find . -type f -name "*.rs" \
             -exec sed -i 's|api.github.com/repos/Strappazzon/drg-mint-notag|api.github.com/repos/un-readable/drg-mint-notag-bypass|g' {} +
 
+          # Patch 4: override toolchain to nightly for bindeps support
           printf '[toolchain]\nchannel = "nightly-2024-02-01"\n' > rust-toolchain.toml
 
+          # Patch 5: update version to match upstream tag
           UPSTREAM_VERSION="${{ matrix.tag }}"
           VERSION="${UPSTREAM_VERSION#v}"
           sed -i "s/^version = \".*\"/version = \"$VERSION\"/" Cargo.toml
@@ -114,7 +135,7 @@ jobs:
         uses: dtolnay/rust-toolchain@nightly
         with:
           toolchain: nightly-2024-02-01
-          targets: x86_64-pc-windows-msvc
+          targets: ${{ matrix.rust_targets }}
 
       - name: Cache Rust dependencies
         uses: actions/cache@v4
@@ -123,23 +144,23 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: windows-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: windows-cargo-
+          key: ${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ matrix.target }}-cargo-
 
       - name: Build
         shell: bash
-        run: cargo build --release --target x86_64-pc-windows-msvc
+        run: cargo build --release --target ${{ matrix.target }}
 
       - name: Stage artifact
         shell: bash
         run: |
           mkdir -p dist
-          cp target/x86_64-pc-windows-msvc/release/mint.exe mint.exe
-          FILES="mint.exe"
-          for f in oo2core_9_win64.dll CHANGELOG.md LICENSE.txt; do
+          cp "target/${{ matrix.target }}/release/${{ matrix.bin }}" "${{ matrix.bin }}"
+          FILES="${{ matrix.bin }}"
+          for f in oo2core_9_win64.dll liboo2corelinux64.so CHANGELOG.md LICENSE.txt; do
             [ -f "$f" ] && FILES="$FILES $f"
           done
-          7z a dist/mint-x86_64-pc-windows-msvc.zip $FILES
+          7z a "dist/mint-${{ matrix.target }}.zip" $FILES
 
       - name: Prepare release notes
         shell: bash
