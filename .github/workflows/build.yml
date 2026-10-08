@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       backfill:
-        description: 'Build ALL upstream releases, oldest to newest'
+        description: 'Build ALL upstream releases from v0.3.0 up, oldest to newest'
         type: boolean
         default: false
       tag:
@@ -40,8 +40,12 @@ jobs:
           if [ -n "$INPUT_TAG" ]; then
             TAGS=$(jq -cn --arg t "$INPUT_TAG" '[$t]')
           elif [ "$BACKFILL" = "true" ]; then
-            TAGS=$(curl -s -H "$AUTH" "$UP?per_page=100" \
-              | jq -c '[.[] | select(.draft == false)] | sort_by(.published_at) | map(.tag_name)')
+            # only tags >= v0.3.0 (older ones need a 2023 toolchain + 2023 lockfile)
+            TAGS=$(curl -s -H "$AUTH" "$UP?per_page=100" | jq -c '
+              [ .[]
+                | select(.draft == false)
+                | select((try (.tag_name | ltrimstr("v") | split(".") | map(tonumber)) catch [0]) >= [0,3,0])
+              ] | sort_by(.published_at) | map(.tag_name)')
           else
             CODE=$(curl -s -o /dev/null -w "%{http_code}" -H "$AUTH" \
               "https://api.github.com/repos/${{ github.repository }}/releases/tags/$NEWEST")
@@ -160,34 +164,6 @@ jobs:
             target
           key: ${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ matrix.target }}-cargo-
-
-      - name: Bump stale crates that break on newer compilers
-        shell: bash
-        run: |
-          # bump <crate> <series prefix> <minimum good version>
-          # Only upgrades locked versions OLDER than the good one; newer pins are left alone.
-          bump() {
-            name="$1"; prefix="$2"; good="$3"
-            for v in $(tr -d '\r' < Cargo.lock \
-                | awk -v n="$name" '$0 == "name = \"" n "\"" {getline; gsub(/version = |"/,""); print}' \
-                | sort -u); do
-              case "$v" in
-                "$prefix".*)
-                  if [ "$v" != "$good" ] && [ "$(printf '%s\n%s\n' "$v" "$good" | sort -V | head -n1)" = "$v" ]; then
-                    echo "Bumping $name $v -> $good"
-                    cargo update -p "$name@$v" --precise "$good" || echo "WARNING: could not bump $name $v"
-                  fi
-                  ;;
-              esac
-            done
-          }
-
-          bump ahash 0.8 0.8.11
-          bump ahash 0.7 0.7.8
-          bump time 0.3 0.3.36
-
-          echo "Resulting versions:"
-          grep -A1 -E '^name = "(ahash|time)"$' Cargo.lock | grep -v '^--' || true
 
       - name: Install cargo-dist (Linux)
         if: runner.os == 'Linux'
