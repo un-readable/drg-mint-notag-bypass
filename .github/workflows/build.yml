@@ -68,11 +68,9 @@ jobs:
         include:
           - target: x86_64-pc-windows-msvc
             os: windows-2022
-            bin: mint.exe
             rust_targets: x86_64-pc-windows-msvc
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-22.04
-            bin: mint
             rust_targets: x86_64-unknown-linux-gnu,x86_64-pc-windows-gnu
 
     steps:
@@ -158,20 +156,29 @@ jobs:
           key: ${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ matrix.target }}-cargo-
 
-      - name: Build
+      - name: Install cargo-dist (Linux)
+        if: runner.os == 'Linux'
         shell: bash
-        run: cargo build --release --target ${{ matrix.target }}
+        run: curl --proto '=https' --tlsv1.2 -LsSf https://github.com/axodotdev/cargo-dist/releases/download/v0.0.7/cargo-dist-installer.sh | sh
 
-      - name: Stage artifact
+      - name: Install cargo-dist (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: irm https://github.com/axodotdev/cargo-dist/releases/download/v0.0.7/cargo-dist-installer.ps1 | iex
+
+      - name: Build with cargo-dist
         shell: bash
         run: |
+          cargo dist build --tag="${{ matrix.tag }}" --output-format=json \
+            --artifacts=local --target=${{ matrix.target }} > dist-manifest.json
+
           mkdir -p dist
-          cp "target/${{ matrix.target }}/release/${{ matrix.bin }}" "${{ matrix.bin }}"
-          FILES="${{ matrix.bin }}"
-          for f in oo2core_9_win64.dll liboo2corelinux64.so CHANGELOG.md LICENSE.txt; do
-            [ -f "$f" ] && FILES="$FILES $f"
+          jq -r '.artifacts[]?.path | select(. != null)' dist-manifest.json | tr -d '\r' | while read -r p; do
+            p=$(echo "$p" | tr '\\' '/')
+            echo "Collecting $p"
+            cp "$p" dist/
           done
-          7z a "dist/mint-${{ matrix.target }}.zip" $FILES
+          ls -la dist
 
       - name: Prepare release notes
         shell: bash
