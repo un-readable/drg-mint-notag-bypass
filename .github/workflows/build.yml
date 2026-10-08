@@ -86,23 +86,20 @@ jobs:
           sudo apt install -y gcc-mingw-w64 libgtk-3-dev
 
       - name: Download upstream source
-        shell: pwsh
+        shell: bash
         run: |
-          $tag = "${{ matrix.tag }}"
-          $url = "https://github.com/Strappazzon/drg-mint-notag/archive/refs/tags/$tag.zip"
-          Invoke-WebRequest -Uri $url -OutFile source.zip
-          Expand-Archive -Path source.zip -DestinationPath staging
-          $extracted = Get-ChildItem -Path staging -Directory | Select-Object -First 1
-          Get-ChildItem $extracted.FullName | ForEach-Object {
-            $dest = Join-Path "." $_.Name
-            if (-not (Test-Path $dest)) {
-              Move-Item $_.FullName -Destination .
-            } else {
-              Write-Host "Skipping existing: $($_.Name)"
-            }
-          }
-          Remove-Item staging -Recurse
-          Remove-Item source.zip
+          TAG="${{ matrix.tag }}"
+          curl -sSL -o "$RUNNER_TEMP/source.zip" \
+            "https://github.com/Strappazzon/drg-mint-notag/archive/refs/tags/$TAG.zip"
+          rm -rf "$RUNNER_TEMP/staging"
+          7z x "$RUNNER_TEMP/source.zip" -o"$RUNNER_TEMP/staging" -y > /dev/null
+
+          # wipe the checked-out files (keep .git) so the tag's source fully replaces them
+          find . -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
+
+          cp -R "$RUNNER_TEMP"/staging/*/. .
+          chmod -R u+w .
+          ls
 
       - name: Apply patches
         shell: bash
