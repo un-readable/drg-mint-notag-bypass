@@ -88,6 +88,13 @@ jobs:
           # Patch 4: override toolchain to nightly for bindeps support
           printf '[toolchain]\nchannel = "nightly-2024-02-01"\n' > rust-toolchain.toml
 
+          # Patch 5: update version to match upstream tag
+          UPSTREAM_VERSION="${{ needs.check-and-build.outputs.upstream_tag }}"
+          # Strip the leading 'v'
+          VERSION="${UPSTREAM_VERSION#v}"
+          sed -i "s/^version = \".*\"/version = \"$VERSION\"/" Cargo.toml
+          echo "Version set to: $VERSION"
+
           echo "Verifying..."
           grep -r "Strappazzon" --include="*.rs" . && echo "WARNING: Strappazzon refs remain" || echo "All clear"
 
