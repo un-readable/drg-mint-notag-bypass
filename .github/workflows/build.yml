@@ -158,7 +158,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ matrix.tag }}
-          name: mint-notag ${{ matrix.tag }}
+          name: mint-notag-bypass ${{ matrix.tag }}
           body_path: ${{ runner.temp }}/notes.md
           make_latest: ${{ matrix.tag == needs.check-and-build.outputs.newest }}
           files: dist/*
