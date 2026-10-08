@@ -13,6 +13,10 @@ on:
         description: 'Build one specific upstream tag (optional)'
         required: false
         default: ''
+      toolchain:
+        description: 'Rust nightly to build with'
+        required: false
+        default: 'nightly-2024-02-01'
 
 jobs:
   check-and-build:
@@ -129,7 +133,8 @@ jobs:
             -exec sed -i 's|api.github.com/repos/Strappazzon/drg-mint-notag|api.github.com/repos/un-readable/drg-mint-notag-bypass|g' {} +
 
           # Patch 4: override toolchain to nightly for bindeps support
-          printf '[toolchain]\nchannel = "nightly-2024-02-01"\n' > rust-toolchain.toml
+          TOOLCHAIN="${{ inputs.toolchain || 'nightly-2024-02-01' }}"
+          printf '[toolchain]\nchannel = "%s"\n' "$TOOLCHAIN" > rust-toolchain.toml
 
           # Patch 5: update version to match upstream tag
           UPSTREAM_VERSION="${{ matrix.tag }}"
@@ -143,7 +148,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@nightly
         with:
-          toolchain: nightly-2024-02-01
+          toolchain: ${{ inputs.toolchain || 'nightly-2024-02-01' }}
           targets: ${{ matrix.rust_targets }}
 
       - name: Cache Rust dependencies
@@ -179,7 +184,7 @@ jobs:
             cp "$p" dist/
           done
           ls -la dist
-          
+
       - name: Add Oodle DLL to Windows zip
         if: runner.os == 'Windows'
         shell: bash
@@ -204,7 +209,7 @@ jobs:
 
           echo "Final contents:"
           7z l "$ZIP"
-          
+
       - name: Prepare release notes
         shell: bash
         run: |
