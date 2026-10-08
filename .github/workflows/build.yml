@@ -161,6 +161,34 @@ jobs:
           key: ${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ matrix.target }}-cargo-
 
+      - name: Bump stale crates that break on newer compilers
+        shell: bash
+        run: |
+          # bump <crate> <series prefix> <minimum good version>
+          # Only upgrades locked versions OLDER than the good one; newer pins are left alone.
+          bump() {
+            name="$1"; prefix="$2"; good="$3"
+            for v in $(tr -d '\r' < Cargo.lock \
+                | awk -v n="$name" '$0 == "name = \"" n "\"" {getline; gsub(/version = |"/,""); print}' \
+                | sort -u); do
+              case "$v" in
+                "$prefix".*)
+                  if [ "$v" != "$good" ] && [ "$(printf '%s\n%s\n' "$v" "$good" | sort -V | head -n1)" = "$v" ]; then
+                    echo "Bumping $name $v -> $good"
+                    cargo update -p "$name@$v" --precise "$good" || echo "WARNING: could not bump $name $v"
+                  fi
+                  ;;
+              esac
+            done
+          }
+
+          bump ahash 0.8 0.8.11
+          bump ahash 0.7 0.7.8
+          bump time 0.3 0.3.36
+
+          echo "Resulting versions:"
+          grep -A1 -E '^name = "(ahash|time)"$' Cargo.lock | grep -v '^--' || true
+
       - name: Install cargo-dist (Linux)
         if: runner.os == 'Linux'
         shell: bash
@@ -174,8 +202,12 @@ jobs:
       - name: Build with cargo-dist
         shell: bash
         run: |
-          cargo dist build --tag="${{ matrix.tag }}" --output-format=json \
-            --artifacts=local --target=${{ matrix.target }} > dist-manifest.json
+          if ! cargo dist build --tag="${{ matrix.tag }}" --output-format=json \
+              --artifacts=local --target=${{ matrix.target }} > dist-manifest.json; then
+            echo "cargo-dist failed. Re-running plain cargo build to show the real error:"
+            cargo build --profile dist --target ${{ matrix.target }} 2>&1 | tail -n 80 || true
+            exit 1
+          fi
 
           mkdir -p dist
           jq -r '.artifacts[]?.path | select(. != null)' dist-manifest.json | tr -d '\r' | while read -r p; do
