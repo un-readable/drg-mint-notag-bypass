@@ -140,19 +140,21 @@ jobs:
           # Patch 4: toolchain
           # Every upstream tag pins nightly-2023-08-18 in its own rust-toolchain.toml, and
           # upstream's CI builds with it. Use that unless an override was typed in.
+          # NOTE: don't name this env var "TOOLCHAIN" - Windows env names are case-insensitive
+          # and it would clobber the "toolchain" input of dtolnay/rust-toolchain.
           if [ -n "$INPUT_TOOLCHAIN" ]; then
-            TOOLCHAIN="$INPUT_TOOLCHAIN"
-            printf '[toolchain]\nchannel = "%s"\n' "$TOOLCHAIN" > rust-toolchain.toml
-            echo "Using override toolchain: $TOOLCHAIN"
+            CHAN="$INPUT_TOOLCHAIN"
+            printf '[toolchain]\nchannel = "%s"\n' "$CHAN" > rust-toolchain.toml
+            echo "Using override toolchain: $CHAN"
           else
-            TOOLCHAIN=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml | tr -d '\r' | head -n1)
-            echo "Using the tag's own toolchain: $TOOLCHAIN"
+            CHAN=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml | tr -d '\r' | head -n1)
+            echo "Using the tag's own toolchain: $CHAN"
           fi
-          if [ -z "$TOOLCHAIN" ]; then
+          if [ -z "$CHAN" ]; then
             echo "ERROR: could not determine the Rust toolchain for this tag"
             exit 1
           fi
-          echo "TOOLCHAIN=$TOOLCHAIN" >> "$GITHUB_ENV"
+          echo "MINT_TOOLCHAIN=$CHAN" >> "$GITHUB_ENV"
 
           # Patch 5: update version to match upstream tag
           sed -i "s/^version = \".*\"/version = \"$VERSION\"/" Cargo.toml
@@ -178,7 +180,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@nightly
         with:
-          toolchain: ${{ env.TOOLCHAIN }}
+          toolchain: ${{ env.MINT_TOOLCHAIN }}
           targets: ${{ matrix.rust_targets }}
 
       - name: Cache Rust dependencies
@@ -188,8 +190,8 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ matrix.target }}-${{ env.TOOLCHAIN }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ matrix.target }}-${{ env.TOOLCHAIN }}-cargo-
+          key: ${{ matrix.target }}-${{ env.MINT_TOOLCHAIN }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ matrix.target }}-${{ env.MINT_TOOLCHAIN }}-cargo-
 
       - name: Install cargo-dist (Linux)
         if: runner.os == 'Linux'
