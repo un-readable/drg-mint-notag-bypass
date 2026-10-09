@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       backfill:
-        description: 'Build ALL upstream releases from v0.3.0 up, oldest to newest'
+        description: 'Build ALL upstream releases, oldest to newest'
         type: boolean
         default: false
       tag:
@@ -14,9 +14,9 @@ on:
         required: false
         default: ''
       toolchain:
-        description: 'Rust nightly to build with'
+        description: 'Override the Rust nightly (leave blank to use each tag''s own pinned toolchain)'
         required: false
-        default: 'nightly-2024-02-01'
+        default: ''
 
 jobs:
   check-and-build:
@@ -40,12 +40,8 @@ jobs:
           if [ -n "$INPUT_TAG" ]; then
             TAGS=$(jq -cn --arg t "$INPUT_TAG" '[$t]')
           elif [ "$BACKFILL" = "true" ]; then
-            # only tags >= v0.3.0 (older ones need a 2023 toolchain + 2023 lockfile)
-            TAGS=$(curl -s -H "$AUTH" "$UP?per_page=100" | jq -c '
-              [ .[]
-                | select(.draft == false)
-                | select((try (.tag_name | ltrimstr("v") | split(".") | map(tonumber)) catch [0]) >= [0,3,0])
-              ] | sort_by(.published_at) | map(.tag_name)')
+            TAGS=$(curl -s -H "$AUTH" "$UP?per_page=100" \
+              | jq -c '[.[] | select(.draft == false)] | sort_by(.published_at) | map(.tag_name)')
           else
             CODE=$(curl -s -o /dev/null -w "%{http_code}" -H "$AUTH" \
               "https://api.github.com/repos/${{ github.repository }}/releases/tags/$NEWEST")
@@ -123,7 +119,12 @@ jobs:
 
       - name: Apply patches
         shell: bash
+        env:
+          INPUT_TOOLCHAIN: ${{ inputs.toolchain }}
         run: |
+          UPSTREAM_VERSION="${{ matrix.tag }}"
+          VERSION="${UPSTREAM_VERSION#v}"
+
           # Patch 1: replace pak filename
           find . -type f \( -name "*.rs" -o -name "*.toml" -o -name "*.md" \) \
             -exec sed -i 's/mods_P\.pak/FSD-WindowsNoEditor099.pak/g' {} +
@@ -136,23 +137,48 @@ jobs:
           find . -type f -name "*.rs" \
             -exec sed -i 's|api.github.com/repos/Strappazzon/drg-mint-notag|api.github.com/repos/un-readable/drg-mint-notag-bypass|g' {} +
 
-          # Patch 4: override toolchain to nightly for bindeps support
-          TOOLCHAIN="${{ inputs.toolchain || 'nightly-2024-02-01' }}"
-          printf '[toolchain]\nchannel = "%s"\n' "$TOOLCHAIN" > rust-toolchain.toml
+          # Patch 4: toolchain
+          # Every upstream tag pins nightly-2023-08-18 in its own rust-toolchain.toml, and
+          # upstream's CI builds with it. Use that unless an override was typed in.
+          if [ -n "$INPUT_TOOLCHAIN" ]; then
+            TOOLCHAIN="$INPUT_TOOLCHAIN"
+            printf '[toolchain]\nchannel = "%s"\n' "$TOOLCHAIN" > rust-toolchain.toml
+            echo "Using override toolchain: $TOOLCHAIN"
+          else
+            TOOLCHAIN=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' rust-toolchain.toml | tr -d '\r' | head -n1)
+            echo "Using the tag's own toolchain: $TOOLCHAIN"
+          fi
+          if [ -z "$TOOLCHAIN" ]; then
+            echo "ERROR: could not determine the Rust toolchain for this tag"
+            exit 1
+          fi
+          echo "TOOLCHAIN=$TOOLCHAIN" >> "$GITHUB_ENV"
 
           # Patch 5: update version to match upstream tag
-          UPSTREAM_VERSION="${{ matrix.tag }}"
-          VERSION="${UPSTREAM_VERSION#v}"
           sed -i "s/^version = \".*\"/version = \"$VERSION\"/" Cargo.toml
           echo "Version set to: $VERSION"
 
           echo "Verifying..."
           grep -r "Strappazzon" --include="*.rs" . && echo "WARNING: Strappazzon refs remain" || echo "All clear"
 
+      - name: Repair stale Cargo.lock (v0.2.11 / v0.2.12)
+        shell: bash
+        run: |
+          # These tags' locks have no entry for the winresource build-dependency (v0.2.12 also
+          # lacks ehttp/jpeg-decoder), so cargo re-resolves and pulls in crates far too new for
+          # the 2023 nightly. The v0.2.13 lock is the same dependency set with those entries added.
+          if ! grep -q '^name = "winresource"$' Cargo.lock; then
+            echo "Cargo.lock has no winresource entry - seeding it from upstream v0.2.13"
+            curl -sSLf -o Cargo.lock \
+              "https://raw.githubusercontent.com/Strappazzon/drg-mint-notag/v0.2.13/Cargo.lock"
+          else
+            echo "Cargo.lock already complete"
+          fi
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@nightly
         with:
-          toolchain: ${{ inputs.toolchain || 'nightly-2024-02-01' }}
+          toolchain: ${{ env.TOOLCHAIN }}
           targets: ${{ matrix.rust_targets }}
 
       - name: Cache Rust dependencies
@@ -162,8 +188,8 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ matrix.target }}-cargo-
+          key: ${{ matrix.target }}-${{ env.TOOLCHAIN }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ matrix.target }}-${{ env.TOOLCHAIN }}-cargo-
 
       - name: Install cargo-dist (Linux)
         if: runner.os == 'Linux'
@@ -197,6 +223,12 @@ jobs:
         if: runner.os == 'Windows'
         shell: bash
         run: |
+          # Tags before v0.2.14 don't use Oodle (no oodle feature in the manifest) - skip those.
+          if ! grep -qi oodle Cargo.toml; then
+            echo "This tag has no oodle feature - not adding the DLL"
+            exit 0
+          fi
+
           if [ ! -f oo2core_9_win64.dll ]; then
             echo "ERROR: oo2core_9_win64.dll not found in workspace"
             exit 1
