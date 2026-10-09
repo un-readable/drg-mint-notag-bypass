@@ -225,12 +225,6 @@ jobs:
         if: runner.os == 'Windows'
         shell: bash
         run: |
-          # Tags before v0.2.14 don't use Oodle (no oodle feature in the manifest) - skip those.
-          if ! grep -qi oodle Cargo.toml; then
-            echo "This tag has no oodle feature - not adding the DLL"
-            exit 0
-          fi
-
           if [ ! -f oo2core_9_win64.dll ]; then
             echo "ERROR: oo2core_9_win64.dll not found in workspace"
             exit 1
@@ -239,10 +233,15 @@ jobs:
           ZIP=$(ls dist/*windows-msvc*.zip | head -n1)
           echo "Zip: $ZIP"
 
-          # find where mint.exe lives inside the zip (root or a wrapper folder)
-          EXE=$(7z l -slt "$ZIP" | tr -d '\r' | sed -n 's/^Path = //p' | grep -i 'mint\.exe$' | head -n1)
+          # find the exe inside the zip (drg_mod_integration.exe before v0.2.16, mint.exe after)
+          EXE=$(7z l -slt "$ZIP" | tr -d '\r' | sed -n 's/^Path = //p' | grep -i '\.exe$' | head -n1)
+          if [ -z "$EXE" ]; then
+            echo "ERROR: no .exe found inside $ZIP"
+            7z l "$ZIP"
+            exit 1
+          fi
           DIR=$(dirname "$EXE")
-          echo "mint.exe is at: $EXE"
+          echo "Exe is at: $EXE (adding the DLL next to it)"
 
           mkdir -p "$RUNNER_TEMP/zipfix/$DIR"
           cp oo2core_9_win64.dll "$RUNNER_TEMP/zipfix/$DIR/"
@@ -251,6 +250,80 @@ jobs:
 
           echo "Final contents:"
           7z l "$ZIP"
+
+      - name: Rename Windows package like upstream (v0.2.11 - v0.2.15)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          # Upstream's v0.2.16+ assets keep cargo-dist's names. The older tags were published as
+          # mint-notag-windows-x86_64.zip containing mint-notag.exe, so repackage to match.
+          case "${{ matrix.tag }}" in
+            v0.2.11|v0.2.12|v0.2.13|v0.2.14|v0.2.15) ;;
+            *) echo "Keeping cargo-dist asset names for ${{ matrix.tag }}"; exit 0 ;;
+          esac
+
+          ZIP=$(ls dist/*windows-msvc*.zip | head -n1)
+          DEST="$(pwd)/dist/mint-notag-windows-x86_64.zip"
+          W="$RUNNER_TEMP/winpkg"; OUT="$RUNNER_TEMP/winout"
+          rm -rf "$W" "$OUT"; mkdir -p "$W" "$OUT"
+
+          7z x "$ZIP" -o"$W" -y > /dev/null
+          EXE=$(find "$W" -type f -iname '*.exe' | head -n1)
+          if [ -z "$EXE" ]; then echo "ERROR: no .exe in $ZIP"; exit 1; fi
+
+          cp "$EXE" "$OUT/mint-notag.exe"
+          # everything else from the archive (the Oodle DLL, license, changelog, ...) goes in flat
+          find "$W" -type f ! -iname '*.exe' -exec cp {} "$OUT/" \;
+
+          (cd "$OUT" && 7z a -tzip "$DEST" ./* > /dev/null)
+          rm -f "$ZIP"
+
+          echo "Final contents:"
+          7z l "$DEST"
+
+      - name: Rename Linux package like upstream (v0.2.11 - v0.2.15)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          # v0.2.11 was published as mint-notag-linux-x86_64.xz,
+          # v0.2.12 - v0.2.15 as mint-notag-linux-x86_64.tar.xz (binary named mint-notag).
+          TAG="${{ matrix.tag }}"
+          case "$TAG" in
+            v0.2.11|v0.2.12|v0.2.13|v0.2.14|v0.2.15) ;;
+            *) echo "Keeping cargo-dist asset names for $TAG"; exit 0 ;;
+          esac
+
+          ARCH=$(ls dist/*linux* 2>/dev/null | head -n1)
+          if [ -z "$ARCH" ]; then echo "ERROR: no Linux archive in dist/"; ls -la dist; exit 1; fi
+          echo "Repackaging $ARCH"
+
+          L="$RUNNER_TEMP/linpkg"; OUT="$RUNNER_TEMP/linout"
+          rm -rf "$L" "$OUT"; mkdir -p "$L" "$OUT"
+
+          case "$ARCH" in
+            *.zip)    7z x "$ARCH" -o"$L" -y > /dev/null ;;
+            *.tar.xz) tar -xJf "$ARCH" -C "$L" ;;
+            *.tar.gz) tar -xzf "$ARCH" -C "$L" ;;
+            *) echo "ERROR: unsupported archive type: $ARCH"; exit 1 ;;
+          esac
+
+          # the binary is by far the biggest file in the archive
+          BIN=$(find "$L" -type f -printf '%s %p\n' | sort -rn | head -n1 | cut -d' ' -f2-)
+          echo "Binary: $BIN"
+
+          cp "$BIN" "$OUT/mint-notag"
+          chmod +x "$OUT/mint-notag"
+
+          if [ "$TAG" = "v0.2.11" ]; then
+            xz -9 -c "$OUT/mint-notag" > dist/mint-notag-linux-x86_64.xz
+          else
+            # keep the other files cargo-dist packaged (license, changelog, ...) next to the binary
+            find "$L" -type f ! -path "$BIN" -exec cp {} "$OUT/" \;
+            tar -C "$OUT" -cf - . | xz -9 > dist/mint-notag-linux-x86_64.tar.xz
+          fi
+          rm -f "$ARCH"
+
+          ls -la dist
 
       - name: Prepare release notes
         shell: bash
