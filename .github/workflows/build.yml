@@ -221,7 +221,7 @@ jobs:
           done
           ls -la dist
 
-      - name: Add Oodle DLL to Windows zip
+      - name: Finalize Windows package (add DLL, rename old tags, max compression)
         if: runner.os == 'Windows'
         shell: bash
         run: |
@@ -231,54 +231,43 @@ jobs:
           fi
 
           ZIP=$(ls dist/*windows-msvc*.zip | head -n1)
-          echo "Zip: $ZIP"
+          ZABS="$(pwd)/$ZIP"
+          BEFORE=$(stat -c %s "$ZABS")
+          echo "cargo-dist zip: $ZIP ($BEFORE bytes)"
 
-          # find the exe inside the zip (drg_mod_integration.exe before v0.2.16, mint.exe after)
-          EXE=$(7z l -slt "$ZIP" | tr -d '\r' | sed -n 's/^Path = //p' | grep -i '\.exe$' | head -n1)
+          # unpack what cargo-dist produced
+          W="$RUNNER_TEMP/winpkg"; rm -rf "$W"; mkdir -p "$W"
+          7z x "$ZABS" -o"$W" -y > /dev/null
+
+          # drop the Oodle DLL next to the exe (drg_mod_integration.exe before v0.2.16, mint.exe after)
+          EXE=$(find "$W" -type f -iname '*.exe' | head -n1)
           if [ -z "$EXE" ]; then
-            echo "ERROR: no .exe found inside $ZIP"
-            7z l "$ZIP"
+            echo "ERROR: no .exe inside $ZIP"
+            7z l "$ZABS"
             exit 1
           fi
-          DIR=$(dirname "$EXE")
-          echo "Exe is at: $EXE (adding the DLL next to it)"
+          cp oo2core_9_win64.dll "$(dirname "$EXE")/"
 
-          mkdir -p "$RUNNER_TEMP/zipfix/$DIR"
-          cp oo2core_9_win64.dll "$RUNNER_TEMP/zipfix/$DIR/"
-          ZIPABS="$(pwd)/$ZIP"
-          (cd "$RUNNER_TEMP/zipfix" && 7z a "$ZIPABS" "$DIR/oo2core_9_win64.dll")
-
-          echo "Final contents:"
-          7z l "$ZIP"
-
-      - name: Rename Windows package like upstream (v0.2.11 - v0.2.15)
-        if: runner.os == 'Windows'
-        shell: bash
-        run: |
-          # Upstream's v0.2.16+ assets keep cargo-dist's names. The older tags were published as
-          # mint-notag-windows-x86_64.zip containing mint-notag.exe, so repackage to match.
           case "${{ matrix.tag }}" in
-            v0.2.11|v0.2.12|v0.2.13|v0.2.14|v0.2.15) ;;
-            *) echo "Keeping cargo-dist asset names for ${{ matrix.tag }}"; exit 0 ;;
+            v0.2.11|v0.2.12|v0.2.13|v0.2.14|v0.2.15)
+              # upstream published these as mint-notag-windows-x86_64.zip with mint-notag.exe at the root
+              OUT="$RUNNER_TEMP/winout"; rm -rf "$OUT"; mkdir -p "$OUT"
+              cp "$EXE" "$OUT/mint-notag.exe"
+              find "$W" -type f ! -iname '*.exe' -exec cp {} "$OUT/" \;
+              DEST="$(pwd)/dist/mint-notag-windows-x86_64.zip"
+              ;;
+            *)
+              # v0.2.16+ keep cargo-dist's name and layout
+              OUT="$W"
+              DEST="$ZABS"
+              ;;
           esac
 
-          ZIP=$(ls dist/*windows-msvc*.zip | head -n1)
-          DEST="$(pwd)/dist/mint-notag-windows-x86_64.zip"
-          W="$RUNNER_TEMP/winpkg"; OUT="$RUNNER_TEMP/winout"
-          rm -rf "$W" "$OUT"; mkdir -p "$W" "$OUT"
+          # rebuild the zip from scratch at maximum deflate (7z's append mode doesn't recompress)
+          rm -f "$ZABS"
+          (cd "$OUT" && 7z a -tzip -mx=9 -mfb=258 -mpass=15 "$DEST" ./* > /dev/null)
 
-          7z x "$ZIP" -o"$W" -y > /dev/null
-          EXE=$(find "$W" -type f -iname '*.exe' | head -n1)
-          if [ -z "$EXE" ]; then echo "ERROR: no .exe in $ZIP"; exit 1; fi
-
-          cp "$EXE" "$OUT/mint-notag.exe"
-          # everything else from the archive (the Oodle DLL, license, changelog, ...) goes in flat
-          find "$W" -type f ! -iname '*.exe' -exec cp {} "$OUT/" \;
-
-          (cd "$OUT" && 7z a -tzip "$DEST" ./* > /dev/null)
-          rm -f "$ZIP"
-
-          echo "Final contents:"
+          echo "Size: $BEFORE -> $(stat -c %s "$DEST") bytes"
           7z l "$DEST"
 
       - name: Rename Linux package like upstream (v0.2.11 - v0.2.15)
